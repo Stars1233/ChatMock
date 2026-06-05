@@ -5,13 +5,16 @@ import datetime
 import hashlib
 import json
 import os
+import platform
 import secrets
 import sys
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from .config import CLIENT_ID_DEFAULT, OAUTH_TOKEN_URL
+from .version import __version__
 
 
 def eprint(*args, **kwargs) -> None:
@@ -23,6 +26,31 @@ def get_home_dir() -> str:
     if not home:
         home = os.path.expanduser("~/.chatgpt-local")
     return home
+
+
+def get_codex_user_agent() -> str:
+    system = platform.system() or "Unknown OS"
+    release = platform.release() or "unknown"
+    machine = platform.machine() or "unknown"
+    return f"chatmock/{__version__} ({system} {release}; {machine})"
+
+
+def resolve_installation_id() -> str:
+    home = get_home_dir()
+    path = os.path.join(home, "installation_id")
+    try:
+        os.makedirs(home, exist_ok=True)
+        try:
+            with open(path, "r", encoding="utf-8") as fp:
+                existing = fp.read().strip()
+            return str(uuid.UUID(existing))
+        except Exception:
+            installation_id = str(uuid.uuid4())
+            with open(path, "w", encoding="utf-8") as fp:
+                fp.write(installation_id)
+            return installation_id
+    except Exception:
+        return str(uuid.uuid4())
 
 
 def read_auth_file() -> Dict[str, Any] | None:
@@ -219,7 +247,11 @@ def convert_tools_chat_to_responses(tools: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def load_chatgpt_tokens(ensure_fresh: bool = True) -> tuple[str | None, str | None, str | None]:
+def load_chatgpt_tokens(
+    ensure_fresh: bool = True,
+    *,
+    force_refresh: bool = False,
+) -> tuple[str | None, str | None, str | None]:
     auth = read_auth_file()
     if not isinstance(auth, dict):
         return None, None, None
@@ -233,7 +265,7 @@ def load_chatgpt_tokens(ensure_fresh: bool = True) -> tuple[str | None, str | No
 
     if ensure_fresh and isinstance(refresh_token, str) and refresh_token and CLIENT_ID_DEFAULT:
         needs_refresh = _should_refresh_access_token(access_token, last_refresh)
-        if needs_refresh or not (isinstance(access_token, str) and access_token):
+        if force_refresh or needs_refresh or not (isinstance(access_token, str) and access_token):
             refreshed = _refresh_chatgpt_tokens(refresh_token, CLIENT_ID_DEFAULT)
             if refreshed:
                 access_token = refreshed.get("access_token") or access_token
@@ -264,6 +296,20 @@ def load_chatgpt_tokens(ensure_fresh: bool = True) -> tuple[str | None, str | No
     id_token = id_token if isinstance(id_token, str) and id_token else None
     account_id = account_id if isinstance(account_id, str) and account_id else None
     return access_token, account_id, id_token
+
+
+def force_refresh_chatgpt_auth() -> tuple[str | None, str | None]:
+    access_token, account_id, id_token = load_chatgpt_tokens(force_refresh=True)
+    if not account_id:
+        account_id = _derive_account_id(id_token)
+    return access_token, account_id
+
+
+def force_refresh_chatgpt_auth() -> tuple[str | None, str | None]:
+    access_token, account_id, id_token = load_chatgpt_tokens(force_refresh=True)
+    if not account_id:
+        account_id = _derive_account_id(id_token)
+    return access_token, account_id
 
 
 def _should_refresh_access_token(access_token: Optional[str], last_refresh: Any) -> bool:
@@ -367,8 +413,8 @@ def _now_iso8601() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def get_effective_chatgpt_auth() -> tuple[str | None, str | None]:
-    access_token, account_id, id_token = load_chatgpt_tokens()
+def get_effective_chatgpt_auth(*, force_refresh: bool = False) -> tuple[str | None, str | None]:
+    access_token, account_id, id_token = load_chatgpt_tokens(force_refresh=force_refresh)
     if not account_id:
         account_id = _derive_account_id(id_token)
     return access_token, account_id

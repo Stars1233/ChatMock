@@ -13,7 +13,7 @@ from .http import build_cors_headers
 from .model_registry import normalize_model_name
 from .session import ensure_session_id
 from flask import request as flask_request
-from .utils import get_effective_chatgpt_auth
+from .utils import get_codex_user_agent, get_effective_chatgpt_auth, resolve_installation_id
 
 
 def _log_json(prefix: str, payload: Any) -> None:
@@ -104,9 +104,11 @@ def build_upstream_headers(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "Accept": accept,
-        "chatgpt-account-id": account_id,
+        "ChatGPT-Account-ID": account_id,
+        "User-Agent": get_codex_user_agent(),
         "OpenAI-Beta": "responses=experimental",
-        "session_id": session_id,
+        "session-id": session_id,
+        "x-codex-installation-id": resolve_installation_id(),
     }
 
 
@@ -148,6 +150,15 @@ def start_upstream_raw_request(
     if verbose:
         _log_json("OUTBOUND >> ChatGPT Responses API payload", responses_payload)
 
+    payload_to_send = dict(responses_payload)
+    client_metadata = payload_to_send.get("client_metadata")
+    if not isinstance(client_metadata, dict):
+        client_metadata = {}
+    else:
+        client_metadata = dict(client_metadata)
+    client_metadata.setdefault("x-codex-installation-id", resolve_installation_id())
+    payload_to_send["client_metadata"] = client_metadata
+
     headers = build_upstream_headers(
         access_token,
         account_id,
@@ -159,7 +170,7 @@ def start_upstream_raw_request(
         upstream = requests.post(
             CHATGPT_RESPONSES_URL,
             headers=headers,
-            json=responses_payload,
+            json=payload_to_send,
             stream=stream,
             timeout=600,
         )
@@ -168,6 +179,39 @@ def start_upstream_raw_request(
         for k, v in build_cors_headers().items():
             resp.headers.setdefault(k, v)
         return None, resp
+
+    if upstream.status_code == 401:
+        refreshed_access_token, refreshed_account_id = get_effective_chatgpt_auth(force_refresh=True)
+        if (
+            isinstance(refreshed_access_token, str)
+            and refreshed_access_token
+            and isinstance(refreshed_account_id, str)
+            and refreshed_account_id
+            and refreshed_access_token != access_token
+        ):
+            try:
+                upstream.close()
+            except Exception:
+                pass
+            retry_headers = build_upstream_headers(
+                refreshed_access_token,
+                refreshed_account_id,
+                effective_session_id,
+                accept=("text/event-stream" if stream else "application/json"),
+            )
+            try:
+                upstream = requests.post(
+                    CHATGPT_RESPONSES_URL,
+                    headers=retry_headers,
+                    json=payload_to_send,
+                    stream=stream,
+                    timeout=600,
+                )
+            except requests.RequestException as e:
+                resp = make_response(jsonify({"error": {"message": f"Upstream ChatGPT request failed after token refresh: {e}"}}), 502)
+                for k, v in build_cors_headers().items():
+                    resp.headers.setdefault(k, v)
+                return None, resp
     return upstream, None
 
 
