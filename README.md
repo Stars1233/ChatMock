@@ -43,11 +43,13 @@ See [DOCKER.md](DOCKER.md)
 
 ```bash
 # 1. Sign in with your ChatGPT account
+# If you are running this on a headless server, append --headless
 chatmock login
 
 # 2. Start the server
 chatmock serve
 ```
+
 
 The server runs at `http://127.0.0.1:8000` by default. Use `http://127.0.0.1:8000/v1` as your base URL for OpenAI-compatible apps.
 
