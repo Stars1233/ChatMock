@@ -8,7 +8,7 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from flask import Response, current_app, jsonify, make_response
 
-from .config import CHATGPT_RESPONSES_URL
+from .config import CHATGPT_RESPONSES_URL, ORIGINATOR
 from .http import build_cors_headers
 from .model_registry import normalize_model_name
 from .session import ensure_session_id
@@ -106,6 +106,7 @@ def build_upstream_headers(
         "Accept": accept,
         "ChatGPT-Account-ID": account_id,
         "User-Agent": get_codex_user_agent(),
+        "originator": ORIGINATOR,
         "OpenAI-Beta": "responses=experimental",
         "session-id": session_id,
         "x-codex-installation-id": resolve_installation_id(),

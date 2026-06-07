@@ -12,8 +12,9 @@ import urllib.request
 from typing import Any, Dict, Tuple
 
 import certifi
+import requests
 
-from .config import OAUTH_ISSUER_DEFAULT
+from .config import OAUTH_ISSUER_DEFAULT, ORIGINATOR
 from .models import AuthBundle, PkceCodes, TokenData
 from .utils import eprint, generate_pkce, parse_jwt_claims, write_auth_file
 
@@ -39,6 +40,144 @@ LOGIN_SUCCESS_HTML = """<!DOCTYPE html>
 """
 
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+
+def _now_iso8601() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _account_id_from_token(id_token: str) -> str:
+    claims = parse_jwt_claims(id_token) or {}
+    auth_claims = claims.get("https://api.openai.com/auth", {})
+    if isinstance(auth_claims, dict):
+        account_id = auth_claims.get("chatgpt_account_id")
+        if isinstance(account_id, str):
+            return account_id
+    return ""
+
+
+def _bundle_from_token_payload(payload: Dict[str, Any], api_key: str | None = None) -> AuthBundle:
+    id_token = payload.get("id_token", "")
+    access_token = payload.get("access_token", "")
+    refresh_token = payload.get("refresh_token", "")
+    return AuthBundle(
+        api_key=api_key,
+        token_data=TokenData(
+            id_token=id_token,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            account_id=_account_id_from_token(id_token),
+        ),
+        last_refresh=_now_iso8601(),
+    )
+
+
+def persist_auth_bundle(bundle: AuthBundle) -> bool:
+    auth_json_contents = {
+        "OPENAI_API_KEY": bundle.api_key,
+        "tokens": {
+            "id_token": bundle.token_data.id_token,
+            "access_token": bundle.token_data.access_token,
+            "refresh_token": bundle.token_data.refresh_token,
+            "account_id": bundle.token_data.account_id,
+        },
+        "last_refresh": bundle.last_refresh,
+    }
+    return write_auth_file(auth_json_contents)
+
+
+def run_device_code_login(client_id: str, *, verbose: bool = False) -> bool:
+    issuer = DEFAULT_ISSUER.rstrip("/")
+    headers = {"Content-Type": "application/json", "User-Agent": f"{ORIGINATOR}/device-login"}
+    try:
+        user_code_resp = requests.post(
+            f"{issuer}/api/accounts/deviceauth/usercode",
+            headers=headers,
+            json={"client_id": client_id},
+            timeout=30,
+        )
+        user_code_resp.raise_for_status()
+        user_code_data = user_code_resp.json()
+    except Exception as exc:
+        eprint(f"ERROR: failed to initiate device login: {exc}")
+        return False
+
+    device_auth_id = user_code_data.get("device_auth_id")
+    user_code = user_code_data.get("user_code") or user_code_data.get("usercode")
+    try:
+        interval = max(int(user_code_data.get("interval") or 5), 1)
+    except Exception:
+        interval = 5
+    if not isinstance(device_auth_id, str) or not isinstance(user_code, str):
+        eprint("ERROR: device login response missing expected fields")
+        return False
+
+    print(f"Open this URL and enter the code:\n{issuer}/codex/device\n\nCode: {user_code}")
+    deadline = time.monotonic() + 15 * 60
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        try:
+            token_resp = requests.post(
+                f"{issuer}/api/accounts/deviceauth/token",
+                headers=headers,
+                json={"device_auth_id": device_auth_id, "user_code": user_code},
+                timeout=30,
+            )
+        except Exception as exc:
+            if verbose:
+                eprint(f"Device login polling failed: {exc}")
+            continue
+
+        if token_resp.status_code in (403, 404):
+            continue
+        if token_resp.status_code >= 400:
+            eprint(f"ERROR: device login failed with status {token_resp.status_code}")
+            return False
+
+        try:
+            data = token_resp.json()
+        except Exception as exc:
+            eprint(f"ERROR: unable to parse device login response: {exc}")
+            return False
+        authorization_code = data.get("authorization_code")
+        code_verifier = data.get("code_verifier")
+        if not isinstance(authorization_code, str) or not isinstance(code_verifier, str):
+            eprint("ERROR: device login token response missing expected fields")
+            return False
+
+        try:
+            exchange_resp = requests.post(
+                f"{issuer}/oauth/token",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "grant_type": "authorization_code",
+                    "code": authorization_code,
+                    "redirect_uri": f"{issuer}/deviceauth/callback",
+                    "client_id": client_id,
+                    "code_verifier": code_verifier,
+                },
+                timeout=30,
+            )
+        except Exception as exc:
+            eprint(f"ERROR: device login token exchange failed: {exc}")
+            return False
+        if exchange_resp.status_code >= 400:
+            eprint(f"ERROR: device login token exchange failed with status {exchange_resp.status_code}")
+            return False
+        try:
+            token_payload = exchange_resp.json()
+        except Exception as exc:
+            eprint(f"ERROR: unable to parse device login token exchange response: {exc}")
+            return False
+        if persist_auth_bundle(_bundle_from_token_payload(token_payload)):
+            eprint("Login successful. Tokens saved.")
+            return True
+        eprint("ERROR: Unable to persist auth file.")
+        return False
+
+    eprint("ERROR: device login timed out")
+    return False
+
 
 class OAuthHTTPServer(http.server.HTTPServer):
     def __init__(
@@ -73,6 +212,7 @@ class OAuthHTTPServer(http.server.HTTPServer):
             "id_token_add_organizations": "true",
             "codex_cli_simplified_flow": "true",
             "state": self.state,
+            "originator": ORIGINATOR,
         }
         return f"{self.issuer}/oauth/authorize?" + urllib.parse.urlencode(params)
 
@@ -98,31 +238,15 @@ class OAuthHTTPServer(http.server.HTTPServer):
         ) as resp:
             payload = json.loads(resp.read().decode())
 
-        id_token = payload.get("id_token", "")
-        access_token = payload.get("access_token", "")
-        refresh_token = payload.get("refresh_token", "")
-
-        id_token_claims = parse_jwt_claims(id_token)
-        access_token_claims = parse_jwt_claims(access_token)
-
-        auth_claims = (id_token_claims or {}).get("https://api.openai.com/auth", {})
-        chatgpt_account_id = auth_claims.get("chatgpt_account_id", "")
-
-        token_data = TokenData(
-            id_token=id_token,
-            access_token=access_token,
-            refresh_token=refresh_token,
-            account_id=chatgpt_account_id,
-        )
+        bundle = _bundle_from_token_payload(payload)
+        id_token_claims = parse_jwt_claims(bundle.token_data.id_token)
+        access_token_claims = parse_jwt_claims(bundle.token_data.access_token)
 
         api_key, success_url = self.maybe_obtain_api_key(
-            id_token_claims or {}, access_token_claims or {}, token_data
+            id_token_claims or {}, access_token_claims or {}, bundle.token_data
         )
 
-        last_refresh_str = (
-            datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-        )
-        bundle = AuthBundle(api_key=api_key, token_data=token_data, last_refresh=last_refresh_str)
+        bundle.api_key = api_key
         return bundle, success_url or f"{URL_BASE}/success"
 
     def maybe_obtain_api_key(
@@ -183,17 +307,7 @@ class OAuthHTTPServer(http.server.HTTPServer):
         return exchanged_access_token, success_url
 
     def persist_auth(self, bundle: AuthBundle) -> bool:
-        auth_json_contents = {
-            "OPENAI_API_KEY": bundle.api_key,
-            "tokens": {
-                "id_token": bundle.token_data.id_token,
-                "access_token": bundle.token_data.access_token,
-                "refresh_token": bundle.token_data.refresh_token,
-                "account_id": bundle.token_data.account_id,
-            },
-            "last_refresh": bundle.last_refresh,
-        }
-        return write_auth_file(auth_json_contents)
+        return persist_auth_bundle(bundle)
 
 
 class OAuthHandler(http.server.BaseHTTPRequestHandler):
@@ -219,6 +333,11 @@ class OAuthHandler(http.server.BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(query)
 
         code = params.get("code", [None])[0]
+        state = params.get("state", [None])[0]
+        if state != self.server.state:
+            self.send_error(400, "State mismatch")
+            self._shutdown()
+            return
         if not code:
             self.send_error(400, "Missing auth code")
             self._shutdown()
@@ -231,17 +350,7 @@ class OAuthHandler(http.server.BaseHTTPRequestHandler):
             self._shutdown()
             return
 
-        auth_json_contents = {
-            "OPENAI_API_KEY": auth_bundle.api_key,
-            "tokens": {
-                "id_token": auth_bundle.token_data.id_token,
-                "access_token": auth_bundle.token_data.access_token,
-                "refresh_token": auth_bundle.token_data.refresh_token,
-                "account_id": auth_bundle.token_data.account_id,
-            },
-            "last_refresh": auth_bundle.last_refresh,
-        }
-        if write_auth_file(auth_json_contents):
+        if persist_auth_bundle(auth_bundle):
             self.server.exit_code = 0
             self._send_html(LOGIN_SUCCESS_HTML)
         else:

@@ -11,7 +11,7 @@ from datetime import datetime
 from .app import create_app
 from .config import CLIENT_ID_DEFAULT
 from .limits import RateLimitWindow, compute_reset_at, load_rate_limit_snapshot
-from .oauth import OAuthHTTPServer, OAuthHandler, REQUIRED_PORT, URL_BASE
+from .oauth import OAuthHTTPServer, OAuthHandler, REQUIRED_PORT, URL_BASE, run_device_code_login
 from .utils import eprint, get_home_dir, load_chatgpt_tokens, parse_jwt_claims, read_auth_file
 
 
@@ -186,12 +186,14 @@ def _print_usage_limits_block() -> None:
 
     print()
 
-def cmd_login(no_browser: bool, verbose: bool) -> int:
+def cmd_login(no_browser: bool, verbose: bool, headless: bool = False) -> int:
     home_dir = get_home_dir()
     client_id = CLIENT_ID_DEFAULT
     if not client_id:
         eprint("ERROR: No OAuth client id configured. Set CHATGPT_LOCAL_CLIENT_ID.")
         return 1
+    if headless:
+        return 0 if run_device_code_login(client_id, verbose=verbose) else 1
 
     try:
         bind_host = os.getenv("CHATGPT_LOCAL_LOGIN_BIND", "127.0.0.1")
@@ -211,47 +213,7 @@ def cmd_login(no_browser: bool, verbose: bool) -> int:
             except Exception as e:
                 eprint(f"Failed to open browser: {e}")
         eprint(f"If your browser did not open, navigate to:\n{auth_url}")
-
-        def _stdin_paste_worker() -> None:
-            try:
-                eprint(
-                    "If the browser can't reach this machine, paste the full redirect URL here and press Enter (or leave blank to keep waiting):"
-                )
-                line = sys.stdin.readline().strip()
-                if not line:
-                    return
-                try:
-                    from urllib.parse import urlparse, parse_qs
-
-                    parsed = urlparse(line)
-                    params = parse_qs(parsed.query)
-                    code = (params.get("code") or [None])[0]
-                    state = (params.get("state") or [None])[0]
-                    if not code:
-                        eprint("Input did not contain an auth code. Ignoring.")
-                        return
-                    if state and state != httpd.state:
-                        eprint("State mismatch. Ignoring pasted URL for safety.")
-                        return
-                    eprint("Received redirect URL. Completing login without callback…")
-                    bundle, _ = httpd.exchange_code(code)
-                    if httpd.persist_auth(bundle):
-                        httpd.exit_code = 0
-                        eprint("Login successful. Tokens saved.")
-                    else:
-                        eprint("ERROR: Unable to persist auth file.")
-                    httpd.shutdown()
-                except Exception as exc:
-                    eprint(f"Failed to process pasted redirect URL: {exc}")
-            except Exception:
-                pass
-
-        try:
-            import threading
-
-            threading.Thread(target=_stdin_paste_worker, daemon=True).start()
-        except Exception:
-            pass
+        eprint("For headless or remote login, use: chatmock login --headless")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
@@ -294,6 +256,7 @@ def main() -> None:
 
     p_login = sub.add_parser("login", help="Authorize with ChatGPT and store tokens")
     p_login.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically")
+    p_login.add_argument("--headless", action="store_true", help="Use device-code login instead of localhost browser callback")
     p_login.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     p_serve = sub.add_parser("serve", help="Run local OpenAI-compatible server")
@@ -363,7 +326,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "login":
-        sys.exit(cmd_login(no_browser=args.no_browser, verbose=args.verbose))
+        sys.exit(cmd_login(no_browser=args.no_browser, verbose=args.verbose, headless=args.headless))
     elif args.command == "serve":
         sys.exit(
             cmd_serve(

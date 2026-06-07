@@ -339,11 +339,15 @@ def _refresh_chatgpt_tokens(refresh_token: str, client_id: str) -> Optional[Dict
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
         "client_id": client_id,
-        "scope": "openid profile email offline_access",
     }
 
     try:
-        resp = requests.post(OAUTH_TOKEN_URL, json=payload, timeout=30)
+        resp = requests.post(
+            OAUTH_TOKEN_URL,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
     except requests.RequestException as exc:
         eprint(f"ERROR: failed to refresh ChatGPT token: {exc}")
         return None
