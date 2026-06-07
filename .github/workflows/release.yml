@@ -87,6 +87,7 @@ jobs:
           path: dist/ChatMock-windows.zip
 
   build-macos:
+    if: false
     needs: validate
     runs-on: macos-latest
     env:
@@ -182,7 +183,7 @@ jobs:
 
             def install
               virtualenv_create(libexec, "python3.11")
-              system libexec/"bin/pip", "install", "."
+              system libexec/"bin/python", "-m", "pip", "install", "."
               bin.install_symlink libexec/"bin/chatmock"
             end
 
@@ -211,7 +212,6 @@ jobs:
       - validate
       - build-python
       - build-windows
-      - build-macos
       - publish-pypi
       - docker
       - homebrew
@@ -226,4 +226,3 @@ jobs:
           files: |
             release-artifacts/python-dist/*
             release-artifacts/windows-gui/*
-            release-artifacts/macos-gui/*
