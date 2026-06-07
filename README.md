@@ -53,40 +53,32 @@ The server runs at `http://127.0.0.1:8000` by default. Use `http://127.0.0.1:800
 
 <br>
 
-## Usage
+## Example usage
 
-<details open>
-<summary><b>Python</b></summary>
+<details>
+<summary><strong>Raycast Integration</strong></summary>
 
-```python
-from openai import OpenAI
+1. **Configure the Host URL**  
+   Open your Raycast Extensions preferences, navigate to the **Ollama** settings section, and input the host URL (default is `127.0.0.1:8000`).  
+   <img width="587" height="211" alt="Raycast Ollama Host URL configuration" src="https://github.com/user-attachments/assets/012c576b-189a-4b96-832d-bb054d484f2b" />
 
-client = OpenAI(
-    base_url="http://127.0.0.1:8000/v1",
-    api_key="anything"  # not checked
-)
+2. **Sync Your Models**  
+   Click the **Sync Models** button, which will register all available models.
 
-response = client.chat.completions.create(
-    model="gpt-5.4",
-    messages=[{"role": "user", "content": "hello"}]
-)
-print(response.choices[0].message.content)
-```
-
+3. **Start Chatting**  
+   Open the Raycast AI Chat interface. You will now see model slugs which you can chat with. 
 </details>
 
 <details>
-<summary><b>cURL</b></summary>
+<summary><strong>Terax (Agentic Terminal) Integration</strong></summary>
 
-```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-5.4",
-    "messages": [{"role": "user", "content": "hello"}]
-  }'
-```
+1. **Configure the provider settings**  
+   Open your Terax settings, and switch to the **Models** tab, add a new provider (**OpenAI Compatible**), and input the host URL (default is `http://127.0.0.1:8000/v1`), along with the model IDs you wish to use (API key may be anything).  
+   <img width="700" height="337" alt="image" src="https://github.com/user-attachments/assets/d1faf4e2-1969-417d-881e-5fb72f9aa252" />
 
+2. **Favourite, and start using it!** <br>
+   Go back to your main chat window, select the model by going to the OpenAI Compatible icon, and clicking the model there (you may favourite it here to quickly select it the next time if you switch between models)
+   <img width="456" height="465" alt="image" src="https://github.com/user-attachments/assets/b9d2ba22-5747-4335-b095-8ec0fb2bb30c" />
 </details>
 
 <br>
@@ -96,8 +88,6 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 - `gpt-5.5`
 - `gpt-5.4`
 - `gpt-5.4-mini`
-- `gpt-5.2`
-- `gpt-5.3-codex`
 - `gpt-5.3-codex-spark`
 
 <br>
@@ -158,7 +148,7 @@ All flags go after `chatmock serve`. These can also be set as environment variab
 
 <br>
 
-## Notes
+## Important notice
 
 Use responsibly and at your own risk. This project is not affiliated with OpenAI.
 
